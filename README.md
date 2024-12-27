@@ -1,10 +1,8 @@
-pubsub server, basically just a hashmap with mutex over tcp
-
-protocol
+Pubsub server, basically just a hashmap with mutex over tcp
 
 TCP PubSub Protocol
 ------------------
-
+```
 PUBLISH (0x00):
 +---------+--------------+----------+--------------+---------+
 | cmd (1) | chan_len (1) | channel  | msg_len (4) | payload |
@@ -18,6 +16,7 @@ SUBSCRIBE (0x01):
 +---------+--------------+----------+
 |   0x01  |     0xNN     | N bytes  |
 +---------+--------------+----------+
+```
 
 Notes:
 - All integers are little-endian
