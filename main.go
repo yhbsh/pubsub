@@ -131,32 +131,32 @@ func (s *pubSub) handleConnection(conn net.Conn) {
 
 	var cmdType uint8
 
-    for {
-        if err := binary.Read(conn, binary.LittleEndian, &cmdType); err != nil {
-            if err != io.EOF {
-                log.Println(err)
-            }
-            return
-        }
-        if cmdType == 0x00 {
-            if err := s.handlePublish(conn); err != nil {
-                log.Println(err)
-                return
-            }
-        } else {
-            break
-        }
+	for {
+		if err := binary.Read(conn, binary.LittleEndian, &cmdType); err != nil {
+			if err != io.EOF {
+				log.Println(err)
+			}
+			return
+		}
+		if cmdType == 0x00 {
+			if err := s.handlePublish(conn); err != nil {
+				log.Println(err)
+				return
+			}
+		} else {
+			break
+		}
 
-    }
+	}
 
-    if cmdType == 0x01 {
-        if err := s.handleSubscribe(conn); err != nil {
-            return
-        }
-    } else {
+	if cmdType == 0x01 {
+		if err := s.handleSubscribe(conn); err != nil {
+			return
+		}
+	} else {
 		log.Println("invalid command type")
 		return
-    }
+	}
 }
 
 func main() {
