@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/binary"
 	"io"
 	"log"
@@ -8,154 +9,174 @@ import (
 	"sync"
 )
 
-type message struct {
+type Message struct {
 	Channel string
 	Payload []byte
 }
 
-type pubSub struct {
-	channels map[string][]net.Conn
-	mu       sync.RWMutex
-	msgChan  chan message
+type Subscription struct {
+	conn     net.Conn
+	channels map[string]struct{}
 }
 
-func newPubSub() *pubSub {
-	return &pubSub{
-		channels: make(map[string][]net.Conn),
-		msgChan:  make(chan message, 100),
+type PubSub struct {
+	subscribers map[net.Conn]*Subscription
+	mu          sync.RWMutex
+	msgChan     chan Message
+}
+
+func newPubSub() *PubSub {
+	return &PubSub{
+		subscribers: make(map[net.Conn]*Subscription),
+		msgChan:     make(chan Message),
 	}
 }
 
-func (s *pubSub) removeConn(channel string, conn net.Conn) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (pubsub *PubSub) removeConn(conn net.Conn) {
+	pubsub.mu.Lock()
+	defer pubsub.mu.Unlock()
+	delete(pubsub.subscribers, conn)
+}
 
-	if conns, ok := s.channels[channel]; ok {
-		for i, c := range conns {
-			if c == conn {
-				s.channels[channel] = append(conns[:i], conns[i+1:]...)
-				break
-			}
-		}
+func (pubsub *PubSub) subscribe(conn net.Conn, channel string) {
+	pubsub.mu.Lock()
+	defer pubsub.mu.Unlock()
 
-		if len(s.channels[channel]) == 0 {
-			delete(s.channels, channel)
+	sub, exists := pubsub.subscribers[conn]
+	if !exists {
+		sub = &Subscription{conn: conn, channels: make(map[string]struct{})}
+		pubsub.subscribers[conn] = sub
+	}
+	sub.channels[channel] = struct{}{} // Add channel to subscription
+}
+
+func (pubsub *PubSub) unsubscribe(conn net.Conn, channel string) {
+	pubsub.mu.Lock()
+	defer pubsub.mu.Unlock()
+
+	if sub, exists := pubsub.subscribers[conn]; exists {
+		delete(sub.channels, channel)
+		// Remove subscriber if they're not subscribed to any channels
+		if len(sub.channels) == 0 {
+			delete(pubsub.subscribers, conn)
 		}
 	}
 }
 
-func (s *pubSub) broadcast() {
-	for msg := range s.msgChan {
-		s.mu.RLock()
-		if clients, ok := s.channels[msg.Channel]; ok {
-			for i, client := range clients {
-				go func(i int, client net.Conn, payload []byte) {
-					if _, err := client.Write(payload); err != nil {
-						log.Printf("cannot write to client %d because of %v", i, err)
-						s.removeConn(msg.Channel, client)
+func (pubsub *PubSub) broadcast() {
+	for msg := range pubsub.msgChan {
+		pubsub.mu.RLock()
+		for _, sub := range pubsub.subscribers {
+			if _, isSubscribed := sub.channels[msg.Channel]; isSubscribed {
+				go func(conn net.Conn, message Message) {
+					channelLen := uint8(len(message.Channel))
+					payloadLen := uint32(len(message.Payload))
+					totalLen := 1 + int(channelLen) + 4 + len(message.Payload)
+					buf := make([]byte, totalLen)
+
+					buf[0] = channelLen
+					copy(buf[1:], message.Channel)
+					binary.LittleEndian.PutUint32(buf[1+channelLen:], payloadLen)
+					copy(buf[1+channelLen+4:], message.Payload)
+
+					n, err := conn.Write(buf)
+					if err != nil || n != totalLen {
+						pubsub.removeConn(conn)
+						log.Println(err)
 						return
 					}
-				}(i, client, msg.Payload)
+				}(sub.conn, msg)
 			}
 		}
-		s.mu.RUnlock()
+		pubsub.mu.RUnlock()
 	}
 }
 
-func (s *pubSub) handlePublish(conn net.Conn) error {
-	var channelLen uint8
-	if err := binary.Read(conn, binary.LittleEndian, &channelLen); err != nil {
-		return err
-	}
-
-	channel := make([]byte, channelLen)
-	if n, err := io.ReadFull(conn, channel); err != nil {
-		return err
-	} else if n != int(channelLen) {
-		return io.ErrShortBuffer
-	}
-
-	var payloadLen uint32
-	if err := binary.Read(conn, binary.LittleEndian, &payloadLen); err != nil {
-		return err
-	}
-
-	payload := make([]byte, payloadLen)
-	if n, err := io.ReadFull(conn, payload); err != nil {
-		return err
-	} else if n != int(payloadLen) {
-		return io.ErrShortBuffer
-	}
-
-	s.msgChan <- message{
-		Channel: string(channel),
-		Payload: payload,
-	}
-	return nil
-}
-
-func (s *pubSub) handleSubscribe(conn net.Conn) error {
-	var channelLen uint8
-	if err := binary.Read(conn, binary.LittleEndian, &channelLen); err != nil {
-		return err
-	}
-
-	channel := make([]byte, channelLen)
-	if n, err := io.ReadFull(conn, channel); err != nil {
-		return err
-	} else if n != int(channelLen) {
-		return io.ErrShortBuffer
-	}
-
-	channelStr := string(channel)
-
-	s.mu.Lock()
-	s.channels[channelStr] = append(s.channels[channelStr], conn)
-	s.mu.Unlock()
-
-	buf := make([]byte, 1)
-	for {
-		_, err := conn.Read(buf)
-		if err != nil {
-			s.removeConn(channelStr, conn)
-			return err
-		}
-	}
-}
-
-func (s *pubSub) handleConnection(conn net.Conn) {
+func (s *PubSub) handleConnection(conn net.Conn) {
 	defer conn.Close()
-
 	log.Printf("[client %s] connected", conn.RemoteAddr())
 	defer log.Printf("[client %s] disconnected", conn.RemoteAddr())
 
-	var cmdType uint8
-
 	for {
+		var cmdType uint8
 		if err := binary.Read(conn, binary.LittleEndian, &cmdType); err != nil {
 			if err != io.EOF {
 				log.Println(err)
 			}
+			s.removeConn(conn)
 			return
 		}
-		if cmdType == 0x00 {
-			if err := s.handlePublish(conn); err != nil {
+
+		switch cmdType {
+		case 0x00: // Publish
+			var channelLen uint8
+			if err := binary.Read(conn, binary.LittleEndian, &channelLen); err != nil {
 				log.Println(err)
 				return
 			}
-		} else {
-			break
-		}
 
-	}
+			channel := make([]byte, channelLen)
+			if n, err := io.ReadFull(conn, channel); err != nil {
+				log.Println(err)
+				return
+			} else if n != int(channelLen) {
+				log.Println("invalid channel length")
+				return
+			}
 
-	if cmdType == 0x01 {
-		if err := s.handleSubscribe(conn); err != nil {
-			return
+			var payloadLen uint32
+			if err := binary.Read(conn, binary.LittleEndian, &payloadLen); err != nil {
+				log.Println(err)
+				return
+			}
+
+			payload := make([]byte, payloadLen)
+			if n, err := io.ReadFull(conn, payload); err != nil {
+				log.Println(err)
+				return
+			} else if n != int(payloadLen) {
+				log.Println("invalid payload length")
+				return
+			}
+
+			s.msgChan <- Message{Channel: string(channel), Payload: payload}
+
+		case 0x01: // Subscribe
+			var channelLen uint8
+			if err := binary.Read(conn, binary.LittleEndian, &channelLen); err != nil {
+				log.Println(err)
+				return
+			}
+
+			channel := make([]byte, channelLen)
+			if n, err := io.ReadFull(conn, channel); err != nil {
+				log.Println(err)
+				return
+			} else if n != int(channelLen) {
+				log.Println("invalid channel length")
+				return
+			}
+
+			s.subscribe(conn, string(channel))
+
+		case 0x02: // Unsubscribe
+			var channelLen uint8
+			if err := binary.Read(conn, binary.LittleEndian, &channelLen); err != nil {
+				log.Println(err)
+				return
+			}
+
+			channel := make([]byte, channelLen)
+			if n, err := io.ReadFull(conn, channel); err != nil {
+				log.Println(err)
+				return
+			} else if n != int(channelLen) {
+				log.Println("invalid channel length")
+				return
+			}
+
+			s.unsubscribe(conn, string(channel))
 		}
-	} else {
-		log.Println("invalid command type")
-		return
 	}
 }
 
@@ -167,8 +188,8 @@ func main() {
 	if err != nil {
 		log.Fatalln(err)
 	}
-
 	log.Println("Listening on port 8081")
+
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
