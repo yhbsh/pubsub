@@ -92,7 +92,7 @@ func (pubsub *PubSub) broadcast() {
 	}
 }
 
-func (s *PubSub) handleConnection(conn net.Conn) {
+func (pubsub *PubSub) handleConnection(conn net.Conn) {
 	defer conn.Close()
 	log.Printf("[client %s] connected", conn.RemoteAddr())
 	defer log.Printf("[client %s] disconnected", conn.RemoteAddr())
@@ -103,7 +103,7 @@ func (s *PubSub) handleConnection(conn net.Conn) {
 			if err != io.EOF {
 				log.Println(err)
 			}
-			s.removeConn(conn)
+			pubsub.removeConn(conn)
 			return
 		}
 
@@ -139,7 +139,7 @@ func (s *PubSub) handleConnection(conn net.Conn) {
 				return
 			}
 
-			s.msgChan <- Message{Channel: string(channel), Payload: payload}
+			pubsub.msgChan <- Message{Channel: string(channel), Payload: payload}
 
 		case 0x01: // Subscribe
 			var channelLen uint8
@@ -157,7 +157,7 @@ func (s *PubSub) handleConnection(conn net.Conn) {
 				return
 			}
 
-			s.subscribe(conn, string(channel))
+			pubsub.subscribe(conn, string(channel))
 
 		case 0x02: // Unsubscribe
 			var channelLen uint8
@@ -175,7 +175,7 @@ func (s *PubSub) handleConnection(conn net.Conn) {
 				return
 			}
 
-			s.unsubscribe(conn, string(channel))
+			pubsub.unsubscribe(conn, string(channel))
 		}
 	}
 }
