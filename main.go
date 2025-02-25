@@ -92,7 +92,7 @@ func main() {
 	go func() {
 		defer wg.Done()
 
-		unixSocketPath := "/tmp/livsho.sock"
+		unixSocketPath := "/tmp/pubsub.sock"
 		if err := os.RemoveAll(unixSocketPath); err != nil {
 			log.Print(err)
 			return
