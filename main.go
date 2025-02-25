@@ -64,65 +64,7 @@ func removeChannel(channels []string, target string) []string {
 	return channels
 }
 
-func main() {
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	go func() {
-		defer wg.Done()
-
-		ln, err := net.Listen("tcp", "0.0.0.0:51011")
-		if err != nil {
-			log.Fatal(err)
-		}
-		log.Print("Listening on 0.0.0.0:51011 (pubsub)")
-		defer ln.Close()
-
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				log.Print("Accept error:", err)
-				continue
-			}
-
-			go HandleSub(conn)
-		}
-	}()
-
-	go func() {
-		defer wg.Done()
-
-		unixSocketPath := "/tmp/pubsub.sock"
-		if err := os.RemoveAll(unixSocketPath); err != nil {
-			log.Print(err)
-			return
-		}
-
-		addr, err := net.ResolveUnixAddr("unix", unixSocketPath)
-		if err != nil {
-			log.Fatal(err)
-		}
-		ln, err := net.ListenUnix("unix", addr)
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer ln.Close()
-
-		for {
-			conn, err := ln.AcceptUnix()
-			if err != nil {
-				log.Print("Accept error:", err)
-				continue
-			}
-
-			go HandlePub(conn)
-		}
-	}()
-
-	wg.Wait()
-}
-
-func HandleSub(conn net.Conn) {
+func HandleSub(conn *net.TCPConn) {
 	log.Printf("[IP %s] connected", conn.RemoteAddr())
 
 	defer func() {
@@ -248,4 +190,66 @@ func HandlePub(conn *net.UnixConn) {
 			mu.RUnlock()
 		}(channel, payload)
 	}
+}
+func main() {
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+
+		addr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:51011")
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		ln, err := net.ListenTCP("tcp", addr)
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Print("Listening on 0.0.0.0:51011 (pubsub)")
+		defer ln.Close()
+
+		for {
+			conn, err := ln.AcceptTCP()
+			if err != nil {
+				log.Print("Accept error:", err)
+				continue
+			}
+
+			go HandleSub(conn)
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+
+		unixSocketPath := "/tmp/pubsub.sock"
+		if err := os.RemoveAll(unixSocketPath); err != nil {
+			log.Print(err)
+			return
+		}
+
+		addr, err := net.ResolveUnixAddr("unix", unixSocketPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		ln, err := net.ListenUnix("unix", addr)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer ln.Close()
+
+		for {
+			conn, err := ln.AcceptUnix()
+			if err != nil {
+				log.Print("Accept error:", err)
+				continue
+			}
+
+			go HandlePub(conn)
+		}
+	}()
+
+	wg.Wait()
 }
