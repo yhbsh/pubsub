@@ -1,200 +1,251 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"io"
 	"log"
 	"net"
+	"os"
+	"slices"
 	"sync"
 )
 
-type Message struct {
-	Channel string
-	Payload []byte
-}
+const (
+	CmdTypePublish     byte = 0
+	CmdTypeSubscribe   byte = 1
+	CmdTypeUnsubscribe byte = 2
+)
 
-type Subscription struct {
-	conn     net.Conn
-	channels map[string]struct{}
-}
+var (
+	subscriptions = make(map[net.Conn][]string)
+	mu            = sync.RWMutex{}
+)
 
-type PubSub struct {
-	subscribers map[net.Conn]*Subscription
-	mu          sync.RWMutex
-	msgChan     chan Message
-}
+func Publish(conn net.Conn, channel []byte, payload []byte) {
+	var buf bytes.Buffer
 
-func newPubSub() *PubSub {
-	return &PubSub{
-		subscribers: make(map[net.Conn]*Subscription),
-		msgChan:     make(chan Message),
+	buf.WriteByte(uint8(len(channel)))
+	buf.Write(channel)
+	if err := binary.Write(&buf, binary.LittleEndian, uint32(len(payload))); err != nil {
+		log.Printf("failed to write payload length: %v", err)
+		return
 	}
-}
+	buf.Write(payload)
 
-func (pubsub *PubSub) removeConn(conn net.Conn) {
-	pubsub.mu.Lock()
-	defer pubsub.mu.Unlock()
-	delete(pubsub.subscribers, conn)
-}
-
-func (pubsub *PubSub) subscribe(conn net.Conn, channel string) {
-	pubsub.mu.Lock()
-	defer pubsub.mu.Unlock()
-
-	sub, exists := pubsub.subscribers[conn]
-	if !exists {
-		sub = &Subscription{conn: conn, channels: make(map[string]struct{})}
-		pubsub.subscribers[conn] = sub
+	if _, err := conn.Write(buf.Bytes()); err != nil {
+		mu.Lock()
+		delete(subscriptions, conn)
+		mu.Unlock()
+		log.Print(err)
+		return
 	}
-	sub.channels[channel] = struct{}{} // Add channel to subscription
+
+	log.Printf("[IP %s] [publish %s] [payload %s]", conn.RemoteAddr(), channel, FmtSize(len(payload)))
+
 }
 
-func (pubsub *PubSub) unsubscribe(conn net.Conn, channel string) {
-	pubsub.mu.Lock()
-	defer pubsub.mu.Unlock()
-
-	if sub, exists := pubsub.subscribers[conn]; exists {
-		delete(sub.channels, channel)
-		// Remove subscriber if they're not subscribed to any channels
-		if len(sub.channels) == 0 {
-			delete(pubsub.subscribers, conn)
+func isSubscribed(channels []string, target string) bool {
+	for i := range channels {
+		ch := channels[i]
+		if ch == target {
+			return true
 		}
 	}
+	return false
 }
 
-func (pubsub *PubSub) broadcast() {
-	for msg := range pubsub.msgChan {
-		pubsub.mu.RLock()
-		for _, sub := range pubsub.subscribers {
-			if _, isSubscribed := sub.channels[msg.Channel]; isSubscribed {
-				go func(conn net.Conn, message Message) {
-					channelLen := uint8(len(message.Channel))
-					payloadLen := uint32(len(message.Payload))
-					totalLen := 1 + int(channelLen) + 4 + len(message.Payload)
-					buf := make([]byte, totalLen)
+func removeChannel(channels []string, target string) []string {
+	for i, ch := range channels {
+		if ch == target {
+			return slices.Delete(channels, i, i+1)
+		}
+	}
+	return channels
+}
 
-					buf[0] = channelLen
-					copy(buf[1:], message.Channel)
-					binary.LittleEndian.PutUint32(buf[1+channelLen:], payloadLen)
-					copy(buf[1+channelLen+4:], message.Payload)
+func main() {
+	var wg sync.WaitGroup
+	wg.Add(2)
 
-					n, err := conn.Write(buf)
-					if err != nil || n != totalLen {
-						pubsub.removeConn(conn)
-						log.Println(err)
-						return
-					}
-				}(sub.conn, msg)
+	go func() {
+		defer wg.Done()
+
+		ln, err := net.Listen("tcp", "0.0.0.0:51011")
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Print("Listening on 0.0.0.0:51011 (pubsub)")
+		defer ln.Close()
+
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				log.Print("Accept error:", err)
+				continue
 			}
+
+			go HandleSub(conn)
 		}
-		pubsub.mu.RUnlock()
-	}
+	}()
+
+	go func() {
+		defer wg.Done()
+
+		unixSocketPath := "/tmp/livsho.sock"
+		if err := os.RemoveAll(unixSocketPath); err != nil {
+			log.Print(err)
+			return
+		}
+
+		addr, err := net.ResolveUnixAddr("unix", unixSocketPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		ln, err := net.ListenUnix("unix", addr)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer ln.Close()
+
+		for {
+			conn, err := ln.AcceptUnix()
+			if err != nil {
+				log.Print("Accept error:", err)
+				continue
+			}
+
+			go HandlePub(conn)
+		}
+	}()
+
+	wg.Wait()
 }
 
-func (pubsub *PubSub) handleConnection(conn net.Conn) {
-	defer conn.Close()
-	log.Printf("[client %s] connected", conn.RemoteAddr())
-	defer log.Printf("[client %s] disconnected", conn.RemoteAddr())
+func HandleSub(conn net.Conn) {
+	log.Printf("[IP %s] connected", conn.RemoteAddr())
+
+	defer func() {
+		log.Printf("[IP %s] disconnected", conn.RemoteAddr())
+		conn.Close()
+
+		mu.Lock()
+		delete(subscriptions, conn)
+		mu.Unlock()
+	}()
 
 	for {
 		var cmdType uint8
 		if err := binary.Read(conn, binary.LittleEndian, &cmdType); err != nil {
 			if err != io.EOF {
-				log.Println(err)
+				log.Printf("[IP %s] %v", conn.RemoteAddr(), err)
 			}
-			pubsub.removeConn(conn)
 			return
 		}
 
-		switch cmdType {
-		case 0x00: // Publish
-			var channelLen uint8
-			if err := binary.Read(conn, binary.LittleEndian, &channelLen); err != nil {
-				log.Println(err)
+		if cmdType != CmdTypeSubscribe && cmdType != CmdTypeUnsubscribe {
+			log.Printf("[IP %s] invalid command type", conn.RemoteAddr())
+			return
+		}
+
+		if cmdType == CmdTypeSubscribe {
+			channel, err := ReadU8(conn)
+			if err != nil {
+				if err != io.EOF {
+					log.Printf("[IP %s] %v", conn.RemoteAddr(), err)
+				}
 				return
 			}
 
-			channel := make([]byte, channelLen)
-			if n, err := io.ReadFull(conn, channel); err != nil {
-				log.Println(err)
-				return
-			} else if n != int(channelLen) {
-				log.Println("invalid channel length")
+			mu.Lock()
+			if subscriptions[conn] == nil {
+				subscriptions[conn] = []string{}
+			}
+
+			if isSubscribed(subscriptions[conn], string(channel)) {
+				continue
+			}
+
+			subscriptions[conn] = append(subscriptions[conn], string(channel))
+			mu.Unlock()
+
+			log.Printf("[IP %s] [subscribed %s]", conn.RemoteAddr(), string(channel))
+		}
+
+		if cmdType == CmdTypeUnsubscribe {
+			channel, err := ReadU8(conn)
+			if err != nil {
+				if err != io.EOF {
+					log.Printf("[IP %s] %v", conn.RemoteAddr(), err)
+				}
 				return
 			}
 
-			var payloadLen uint32
-			if err := binary.Read(conn, binary.LittleEndian, &payloadLen); err != nil {
-				log.Println(err)
-				return
+			mu.Lock()
+			if channels, exists := subscriptions[conn]; exists {
+				subscriptions[conn] = removeChannel(channels, string(channel))
+
+				if len(subscriptions[conn]) == 0 {
+					delete(subscriptions, conn)
+				}
 			}
+			mu.Unlock()
 
-			payload := make([]byte, payloadLen)
-			if n, err := io.ReadFull(conn, payload); err != nil {
-				log.Println(err)
-				return
-			} else if n != int(payloadLen) {
-				log.Println("invalid payload length")
-				return
-			}
-
-			pubsub.msgChan <- Message{Channel: string(channel), Payload: payload}
-
-		case 0x01: // Subscribe
-			var channelLen uint8
-			if err := binary.Read(conn, binary.LittleEndian, &channelLen); err != nil {
-				log.Println(err)
-				return
-			}
-
-			channel := make([]byte, channelLen)
-			if n, err := io.ReadFull(conn, channel); err != nil {
-				log.Println(err)
-				return
-			} else if n != int(channelLen) {
-				log.Println("invalid channel length")
-				return
-			}
-
-			pubsub.subscribe(conn, string(channel))
-
-		case 0x02: // Unsubscribe
-			var channelLen uint8
-			if err := binary.Read(conn, binary.LittleEndian, &channelLen); err != nil {
-				log.Println(err)
-				return
-			}
-
-			channel := make([]byte, channelLen)
-			if n, err := io.ReadFull(conn, channel); err != nil {
-				log.Println(err)
-				return
-			} else if n != int(channelLen) {
-				log.Println("invalid channel length")
-				return
-			}
-
-			pubsub.unsubscribe(conn, string(channel))
+			log.Printf("[IP %s] [unsubscribed %s]", conn.RemoteAddr(), string(channel))
 		}
 	}
 }
 
-func main() {
-	pubsub := newPubSub()
-	go pubsub.broadcast()
+func HandlePub(conn *net.UnixConn) {
+	defer func() {
+		conn.Close()
 
-	ln, err := net.Listen("tcp", "0.0.0.0:8081")
-	if err != nil {
-		log.Fatalln(err)
-	}
-	log.Println("Listening on port 8081")
+		mu.Lock()
+		delete(subscriptions, conn)
+		mu.Unlock()
+	}()
 
 	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			log.Println(err)
-			continue
+		var cmdType uint8
+		if err := binary.Read(conn, binary.LittleEndian, &cmdType); err != nil {
+			if err != io.EOF {
+				log.Printf("[IP %s] %v", conn.RemoteAddr(), err)
+			}
+			return
 		}
-		go pubsub.handleConnection(conn)
+
+		if cmdType != CmdTypePublish {
+			log.Printf("[IP unix] invalid command from unix domain socket, valid command is publish only")
+			return
+		}
+
+		channel, err := ReadU8(conn)
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("[IP unix] %v", err)
+			}
+			return
+		}
+
+		payload, err := ReadU32(conn)
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("[IP unix] %v", err)
+			}
+			return
+		}
+
+		go func(channel []byte, payload []byte) {
+			log.Printf("[channel %s] publish .....", channel)
+			mu.RLock()
+			for conn, channels := range subscriptions {
+				if !isSubscribed(channels, string(channel)) {
+					continue
+				}
+
+				go Publish(conn, channel, payload)
+			}
+			mu.RUnlock()
+		}(channel, payload)
 	}
 }
