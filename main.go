@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -166,20 +165,19 @@ func main() {
 	go func() {
 		defer wg.Done()
 
-		cert, err := tls.LoadX509KeyPair("cert.pem", "key.pem")
+        addr, err := net.ResolveTCPAddr("tcp4", ADDR_PUBSUB)
 		if err != nil {
 			log.Fatal(err)
 		}
-
-		ln, err := tls.Listen("tcp", ADDR_PUBSUB, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13})
+		ln, err := net.ListenTCP("tcp4", addr)
 		if err != nil {
 			log.Fatal(err)
 		}
 		defer ln.Close()
 
-		log.Printf("Listening on %s (pubsub)", ADDR_PUBSUB)
+		log.Printf("Listening on %s", ADDR_PUBSUB)
 		for {
-			conn, err := ln.Accept()
+			conn, err := ln.AcceptTCP()
 			if err != nil {
 				log.Printf("Accept error %v", err)
 				continue
@@ -222,7 +220,7 @@ func main() {
 	wg.Wait()
 }
 
-func HandleSub(conn net.Conn) {
+func HandleSub(conn *net.TCPConn) {
 	log.Printf("[conn %s] connected", conn.RemoteAddr())
 
 	defer func() {
