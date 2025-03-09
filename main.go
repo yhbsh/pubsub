@@ -14,14 +14,14 @@ import (
 )
 
 const (
-	ADDR_PUBSUB = "0.0.0.0:9000"
-	KB          = 1024
-	MB          = KB * 1024
-	GB          = MB * 1024
-	RED         = "\033[31m"
-	GREEN       = "\033[32m"
-	BLUE        = "\033[34m"
-	RESET       = "\033[0m"
+	ADDR  = "0.0.0.0:9000"
+	KB    = 1024
+	MB    = KB * 1024
+	GB    = MB * 1024
+	RED   = "\033[31m"
+	GREEN = "\033[32m"
+	BLUE  = "\033[34m"
+	RESET = "\033[0m"
 )
 
 var (
@@ -29,7 +29,7 @@ var (
 	mutex    = sync.RWMutex{}
 )
 
-func ReadU32(r io.Reader) ([]byte, error) {
+func rl32(r io.Reader) ([]byte, error) {
 	var chunkLen uint32
 	if err := binary.Read(r, binary.LittleEndian, &chunkLen); err != nil {
 		return nil, err
@@ -48,7 +48,7 @@ func ReadU32(r io.Reader) ([]byte, error) {
 	return chunk, nil
 }
 
-func ReadU8(r io.Reader) ([]byte, error) {
+func rl8(r io.Reader) ([]byte, error) {
 	var length uint8
 	if err := binary.Read(r, binary.LittleEndian, &length); err != nil {
 		return nil, err
@@ -165,7 +165,7 @@ func main() {
 	go func() {
 		defer wg.Done()
 
-        addr, err := net.ResolveTCPAddr("tcp4", ADDR_PUBSUB)
+		addr, err := net.ResolveTCPAddr("tcp4", ADDR)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -175,7 +175,7 @@ func main() {
 		}
 		defer ln.Close()
 
-		log.Printf("Listening on %s", ADDR_PUBSUB)
+		log.Printf("Listening on %s", ADDR)
 		for {
 			conn, err := ln.AcceptTCP()
 			if err != nil {
@@ -241,7 +241,7 @@ func HandleSub(conn *net.TCPConn) {
 			return
 		}
 
-		channel, err := ReadU8(conn)
+		channel, err := rl8(conn)
 		if err != nil {
 			log.Printf("[conn %s] %v", conn.RemoteAddr(), err)
 			return
@@ -272,13 +272,13 @@ func HandlePub(conn *net.UnixConn) {
 		return
 	}
 
-	channel, err := ReadU8(conn)
+	channel, err := rl8(conn)
 	if err != nil {
 		log.Printf("[IP unix] %v", err)
 		return
 	}
 
-	payload, err := ReadU32(conn)
+	payload, err := rl32(conn)
 	if err != nil {
 		log.Printf("[IP unix] %v", err)
 		return
