@@ -30,22 +30,22 @@ var (
 )
 
 func rl32(r io.Reader) ([]byte, error) {
-	var chunkLen uint32
-	if err := binary.Read(r, binary.LittleEndian, &chunkLen); err != nil {
+	var length uint32
+	if err := binary.Read(r, binary.LittleEndian, &length); err != nil {
 		return nil, err
 	}
 
-	chunk := make([]byte, chunkLen)
-	n, err := io.ReadFull(r, chunk)
+	payload := make([]byte, length)
+	n, err := io.ReadFull(r, payload)
 	if err != nil {
 		return nil, err
 	}
 
-	if n != int(chunkLen) {
+	if n != int(length) {
 		return nil, errors.New("invalid chunk length")
 	}
 
-	return chunk, nil
+	return payload, nil
 }
 
 func rl8(r io.Reader) ([]byte, error) {
