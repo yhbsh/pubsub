@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"sync"
-	"time"
 
 	"github.com/yhbsh/pubsub/pkg/utils"
 )
@@ -46,7 +45,7 @@ func (server *Server) runTcp() error {
 			continue
 		}
 
-		go server.handleSubscriber(conn)
+		go server.serveSub(conn)
 	}
 }
 
@@ -76,7 +75,7 @@ func (server *Server) runUnix() error {
 			continue
 		}
 
-		go server.handlePublisher(conn)
+		go server.servePub(conn)
 	}
 }
 
@@ -97,7 +96,7 @@ func (server *Server) Run() {
 	wg.Wait()
 }
 
-func (server *Server) handleSubscriber(conn net.Conn) {
+func (server *Server) serveSub(conn net.Conn) {
 	log.Printf("[conn %s] connected", conn.RemoteAddr())
 
 	defer func() {
@@ -126,16 +125,16 @@ func (server *Server) handleSubscriber(conn net.Conn) {
 
 		switch commandType {
 		case 1:
-			server.Subscribe(conn, string(channel))
+			server.subscribe(conn, string(channel))
 		case 2:
-			server.Unsubscribe(conn, string(channel))
+			server.unsubscribe(conn, string(channel))
 		default:
 			log.Printf("[conn %s] invalid command type", conn.RemoteAddr())
 		}
 	}
 }
 
-func (server *Server) handlePublisher(conn net.Conn) {
+func (server *Server) servePub(conn net.Conn) {
 	defer conn.Close()
 
 	var cmdType uint8
@@ -145,26 +144,26 @@ func (server *Server) handlePublisher(conn net.Conn) {
 	}
 
 	if cmdType != 0 {
-		log.Printf("[IP unix] invalid command from unix domain socket, valid command is publish only")
+		log.Printf("invalid command type from publisher")
 		return
 	}
 
 	channel, err := utils.R8le(conn)
 	if err != nil {
-		log.Printf("[IP unix] %v", err)
+		log.Print(err)
 		return
 	}
 
 	payload, err := utils.R32le(conn)
 	if err != nil {
-		log.Printf("[IP unix] %v", err)
+		log.Print(err)
 		return
 	}
 
-	go server.Publish(channel, payload)
+	go server.publish(channel, payload)
 }
 
-func (server *Server) Subscribe(conn net.Conn, channel string) {
+func (server *Server) subscribe(conn net.Conn, channel string) {
 	server.mutex.Lock()
 	defer server.mutex.Unlock()
 
@@ -176,7 +175,7 @@ func (server *Server) Subscribe(conn net.Conn, channel string) {
 	log.Printf("[conn %s] [subscribed %s]", conn.RemoteAddr(), string(channel))
 }
 
-func (server *Server) Unsubscribe(conn net.Conn, channel string) {
+func (server *Server) unsubscribe(conn net.Conn, channel string) {
 	server.mutex.Lock()
 	defer server.mutex.Unlock()
 
@@ -189,14 +188,13 @@ func (server *Server) Unsubscribe(conn net.Conn, channel string) {
 	}
 }
 
-func (server *Server) Publish(channel []byte, payload []byte) {
+func (server *Server) publish(channel []byte, payload []byte) {
 	server.mutex.Lock()
 	conns, exists := server.channels[string(channel)]
 	server.mutex.Unlock()
 
-	log.Printf("[channel %s] begin publish", channel)
 	if !exists {
-		log.Printf("[channel %s] end publish, no clients", channel)
+		log.Printf("[channel %s] no publish, no clients", channel)
 		return
 	}
 
@@ -206,9 +204,6 @@ func (server *Server) Publish(channel []byte, payload []byte) {
 	for conn := range conns {
 		go func(conn net.Conn, channel []byte, payload []byte) {
 			defer wg.Done()
-			startTime := time.Now()
-
-			log.Printf("[channel %s] begin publish to client %s", channel, conn.RemoteAddr())
 
 			var buf bytes.Buffer
 			buf.WriteByte(byte(len(channel)))
@@ -219,13 +214,12 @@ func (server *Server) Publish(channel []byte, payload []byte) {
 			buf.WriteByte(byte(len(payload) >> (8 * 3)))
 			buf.Write(payload)
 
+			log.Printf("[channel %s] publish... client %s", channel, conn.RemoteAddr())
+			utils.DumpJson(payload)
 			if _, err := conn.Write(buf.Bytes()); err != nil {
 				log.Print(err)
 				return
 			}
-
-			elapsed := time.Since(startTime)
-			log.Printf("[channel %s] end publish to client %s [time %s]", channel, conn.RemoteAddr(), utils.FmtTime(elapsed))
 		}(conn, channel, payload)
 	}
 

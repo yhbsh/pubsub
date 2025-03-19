@@ -2,9 +2,11 @@ package utils
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"time"
 )
 
@@ -76,4 +78,14 @@ func FmtTime(d time.Duration) string {
 	} else {
 		return fmt.Sprintf("%s%03dµs%s", BLUE, d.Microseconds(), RESET)
 	}
+}
+
+func DumpJson(raw []byte) {
+	p := map[string]any{}
+	json.Unmarshal(raw, &p)
+	payload, err := json.MarshalIndent(p, "", "    ")
+	if err != nil {
+		log.Print(err)
+	}
+	fmt.Println(string(payload))
 }
