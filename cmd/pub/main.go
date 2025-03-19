@@ -18,14 +18,14 @@ func main() {
 		channel := fmt.Sprintf("channel_%d", i)
 		payload := fmt.Sprintf("payload_%d", i)
 
-		go func(i int) {
+		go func(channel string, payload string) {
 			defer wg.Done()
 			if err := client.Publish([]byte(channel), []byte(payload)); err != nil {
 				log.Fatal(err)
 			}
 
 			log.Printf("Publish | channel -> %s | payload -> %s", channel, payload)
-		}(i)
+		}(channel, payload)
 	}
 
 	wg.Wait()
