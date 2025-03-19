@@ -9,24 +9,24 @@ import (
 )
 
 func main() {
-    wg := sync.WaitGroup{}
+	wg := sync.WaitGroup{}
 
 	client := client.New(9000)
 	for i := range 1000 {
-        wg.Add(1)
+		wg.Add(1)
 
-        channel := fmt.Sprintf("channel_%d", i)
-        payload := fmt.Sprintf("payload_%d", i)
+		channel := fmt.Sprintf("channel_%d", i)
+		payload := fmt.Sprintf("payload_%d", i)
 
-        go func(i int) {
-            defer wg.Done()
-            if err := client.Publish([]byte(channel), []byte(payload)); err != nil {
-                log.Fatal(err)
-            }
+		go func(i int) {
+			defer wg.Done()
+			if err := client.Publish([]byte(channel), []byte(payload)); err != nil {
+				log.Fatal(err)
+			}
 
-            log.Printf("Publish | channel -> %s | payload -> %s", channel, payload)
-        }(i)
+			log.Printf("Publish | channel -> %s | payload -> %s", channel, payload)
+		}(i)
 	}
 
-    wg.Wait()
+	wg.Wait()
 }
